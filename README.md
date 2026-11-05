@@ -11,7 +11,9 @@ Live at https://aman-tugnawat.github.io/eink-spectra6-photo-optimizer/ . Fully s
 
 If you change Tailwind classes in `index.html`, rebuild the CSS with `npm run build:css`.
 
-  - **Upload:** Supports PNG, JPG, HEIC.
+  - **Upload:** JPEG, PNG, WebP, AVIF, GIF, BMP, SVG, TIFF and HEIC/HEIF. Every input is converted to JPEG first. HEIC uses the browser's own decoder when it has one (Safari) and falls back to vendored `heic2any`; TIFF uses vendored `UTIF.js`. Both load only when needed.
+  - **Output:** switch between **Output (Spectra 6)**, the dithered PNG for the panel, and **Output (Raw JPEG cropped)**, the 800x480 crop/fit before dithering.
+  - **Samples:** `samples/` has one test file per tricky format (HEIC, TIFF, WebP, JPEG).
   - **Resize:** Automatically covers 800x480.
   - **Dither:** Built-in Floyd-Steinberg dithering in the browser.
 
