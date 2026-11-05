@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Spectra 6 Image Converter</title>
+    
+    <!-- React & Libraries -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <style>
+        body { background-color: #0f172a; color: #e2e8f0; font-family: sans-serif; }
+        .pixelated { image-rendering: pixelated; }
+        .spinner {
+            width: 24px; height: 24px;
+            border: 3px solid rgba(255,255,255,0.3);
+            border-top-color: #3b82f6; border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        /* Checkerboard pattern */
+        .checkboard {
+            background-image: 
+                linear-gradient(45deg, #1e293b 25%, transparent 25%), 
+                linear-gradient(-45deg, #1e293b 25%, transparent 25%), 
+                linear-gradient(45deg, transparent 75%, #1e293b 75%), 
+                linear-gradient(-45deg, transparent 75%, #1e293b 75%);
+            background-size: 20px 20px;
+            background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
+        }
+        /* Crop Overlay Styles */
+        .crop-handle {
+            cursor: grab;
+            box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.65); /* Darken area outside crop */
+        }
+        .crop-handle:active {
+            cursor: grabbing;
+            border-color: #3b82f6;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        // --- CONSTANTS ---
+        const TARGET_W = 800;
+        const TARGET_H = 480;
+        const TARGET_RATIO = TARGET_W / TARGET_H;
+
+        // --- PALETTE & DITHERING ---
+        const PALETTE = [
+            [0, 0, 0],       // Black
+            [255, 255, 255], // White
+            [255, 0, 0],     // Red
+            [0, 255, 0],     // Green
+            [0, 0, 255],     // Blue
+            [255, 255, 0],   // Yellow
+            [255, 128, 0]    // Orange
+        ];
+
+        function getNearestColor(r, g, b) {
+            let minDist = Infinity;
+            let bestColor = PALETTE[0];
+            for (let i = 0; i < PALETTE.length; i++) {
+                const color = PALETTE[i];
+                const dist = Math.sqrt(Math.pow(r - color[0], 2) + Math.pow(g - color[1], 2) + Math.pow(b - color[2], 2));
+                if (dist < minDist) { minDist = dist; bestColor = color; }
+            }
+            return bestColor;
+        }
+
+        function ditherImageData(imageData) {
+            const width = imageData.width;
+            const height = imageData.height;
+            const data = imageData.data;
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    const i = (y * width + x) * 4;
+                    const oldR = data[i]; const oldG = data[i+1]; const oldB = data[i+2];
+                    const nearest = getNearestColor(oldR, oldG, oldB);
+                    data[i] = nearest[0]; data[i+1] = nearest[1]; data[i+2] = nearest[2];
+                    const errR = oldR - nearest[0]; const errG = oldG - nearest[1]; const errB = oldB - nearest[2];
+                    const distribute = (dx, dy, factor) => {
+                        const nx = x + dx; const ny = y + dy;
+                        if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                            const ni = (ny * width + nx) * 4;
+                            data[ni] = Math.min(255, Math.max(0, data[ni] + errR * factor));
+                            data[ni+1] = Math.min(255, Math.max(0, data[ni+1] + errG * factor));
+                            data[ni+2] = Math.min(255, Math.max(0, data[ni+2] + errB * factor));
+                        }
+                    };
+                    distribute(1, 0, 7/16); distribute(-1, 1, 3/16); distribute(0, 1, 5/16); distribute(1, 1, 1/16);
+                }
+            }
+            return imageData;
+        }
+
+        // --- ICONS ---
+        const Icons = {
+            Upload: () => <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" /></svg>,
+            Download: () => <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>,
+            Crop: () => <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4M10 20h4" /></svg>, // Simpler icon representation
+            Check: () => <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" /></svg>
+        };
+
+        // --- CROP EDITOR COMPONENT ---
+        const CropEditor = ({ src, initialPos, onApply, onCancel }) => {
+            const containerRef = useRef(null);
+            const [localPos, setLocalPos] = useState(initialPos); // {x: 0..1, y: 0..1}
+            const [imgInfo, setImgInfo] = useState(null); // { w, h, ratio }
+            const [isDragging, setIsDragging] = useState(false);
+
+            const handleLoad = (e) => {
+                const { naturalWidth, naturalHeight } = e.target;
+                setImgInfo({ w: naturalWidth, h: naturalHeight, ratio: naturalWidth / naturalHeight });
+            };
+
+            const updateDrag = (clientX, clientY) => {
+                if (!containerRef.current || !imgInfo) return;
+                const rect = containerRef.current.getBoundingClientRect();
+                
+                // Calculate logic
+                const isWider = imgInfo.ratio > TARGET_RATIO;
+                
+                if (isWider) {
+                    // Dragging Horizontally
+                    // Calculate visual width of the crop box relative to container
+                    // Box Width % = (TargetRatio / ImgRatio)
+                    // The "track" length is (1 - BoxWidth%)
+                    const boxPercent = TARGET_RATIO / imgInfo.ratio;
+                    const trackLength = 1 - boxPercent; 
+                    
+                    if (trackLength <= 0) return; // Exact fit
+
+                    const clickXRel = clientX - rect.left;
+                    const clickXPercent = clickXRel / rect.width;
+                    
+                    // Center the drag on mouse if we assume clicking center, 
+                    // but simpler is mapping position:
+                    // Let's assume we are dragging the center of the box? 
+                    // Or mapping the box position directly.
+                    // Let's implement simpler: The box follows the mouse, clamped.
+                    
+                    let newX = (clickXPercent - (boxPercent/2)) / trackLength;
+                    newX = Math.max(0, Math.min(1, newX));
+                    setLocalPos(p => ({ ...p, x: newX }));
+                } else {
+                    // Dragging Vertically
+                    const boxPercent = imgInfo.ratio / TARGET_RATIO;
+                    const trackLength = 1 - boxPercent;
+
+                    if (trackLength <= 0) return;
+
+                    const clickYRel = clientY - rect.top;
+                    const clickYPercent = clickYRel / rect.height;
+                    
+                    let newY = (clickYPercent - (boxPercent/2)) / trackLength;
+                    newY = Math.max(0, Math.min(1, newY));
+                    setLocalPos(p => ({ ...p, y: newY }));
+                }
+            };
+
+            const handleMouseDown = (e) => { setIsDragging(true); updateDrag(e.clientX, e.clientY); };
+            const handleTouchStart = (e) => { setIsDragging(true); updateDrag(e.touches[0].clientX, e.touches[0].clientY); };
+
+            useEffect(() => {
+                const move = (e) => { if(isDragging) updateDrag(e.clientX, e.clientY); };
+                const up = () => setIsDragging(false);
+                const tMove = (e) => { if(isDragging) { e.preventDefault(); updateDrag(e.touches[0].clientX, e.touches[0].clientY); } };
+                
+                window.addEventListener('mousemove', move);
+                window.addEventListener('mouseup', up);
+                window.addEventListener('touchmove', tMove, {passive: false});
+                window.addEventListener('touchend', up);
+                return () => {
+                    window.removeEventListener('mousemove', move);
+                    window.removeEventListener('mouseup', up);
+                    window.removeEventListener('touchmove', tMove);
+                    window.removeEventListener('touchend', up);
+                };
+            }, [isDragging, imgInfo]);
+
+            // Calculate Style
+            const getBoxStyle = () => {
+                if(!imgInfo) return { display: 'none' };
+                const isWider = imgInfo.ratio > TARGET_RATIO;
+                if (isWider) {
+                    const widthP = (TARGET_RATIO / imgInfo.ratio) * 100;
+                    const leftP = localPos.x * (100 - widthP);
+                    return { width: `${widthP}%`, height: '100%', top: 0, left: `${leftP}%` };
+                } else {
+                    const heightP = (imgInfo.ratio / TARGET_RATIO) * 100;
+                    const topP = localPos.y * (100 - heightP);
+                    return { width: '100%', height: `${heightP}%`, left: 0, top: `${topP}%` };
+                }
+            };
+
+            return (
+                <div className="absolute inset-0 bg-black z-20 flex flex-col">
+                    <div className="flex-1 relative flex items-center justify-center overflow-hidden bg-slate-900 p-4">
+                        <div ref={containerRef} className="relative shadow-2xl" onMouseDown={handleMouseDown} onTouchStart={handleTouchStart}>
+                            <img src={src} onLoad={handleLoad} className="max-w-full max-h-[60vh] object-contain block pointer-events-none select-none" />
+                            {imgInfo && (
+                                <div className="absolute inset-0">
+                                    <div className="crop-handle absolute border-2 border-white" style={getBoxStyle()}>
+                                        {/* Grid */}
+                                        <div className="w-full h-full relative opacity-50">
+                                            <div className="absolute left-1/3 top-0 bottom-0 border-l border-white/50"></div>
+                                            <div className="absolute right-1/3 top-0 bottom-0 border-l border-white/50"></div>
+                                            <div className="absolute top-1/3 left-0 right-0 border-t border-white/50"></div>
+                                            <div className="absolute bottom-1/3 left-0 right-0 border-t border-white/50"></div>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                    <div className="bg-slate-800 p-4 flex justify-between items-center border-t border-slate-700">
+                        <span className="text-slate-400 text-sm hidden sm:block">Drag the box to adjust crop</span>
+                        <div className="flex gap-4 ml-auto w-full sm:w-auto">
+                            <button onClick={onCancel} className="flex-1 sm:flex-none px-4 py-2 rounded border border-slate-600 text-slate-300 hover:bg-slate-700">Cancel</button>
+                            <button onClick={() => onApply(localPos)} className="flex-1 sm:flex-none px-6 py-2 rounded bg-green-600 text-white font-bold hover:bg-green-500 shadow-lg flex items-center justify-center gap-2">
+                                <Icons.Check /> Apply Crop
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const App = () => {
+            const [originalSrc, setOriginalSrc] = useState(null);
+            const [processedSrc, setProcessedSrc] = useState(null);
+            const [downloadUrl, setDownloadUrl] = useState(null);
+            const [isProcessing, setIsProcessing] = useState(false);
+            
+            // Settings
+            const [mode, setMode] = useState('crop');
+            const [fitColor, setFitColor] = useState('#FFFFFF');
+            const [fitExtend, setFitExtend] = useState(false);
+            
+            // Crop State
+            const [cropPos, setCropPos] = useState({ x: 0.5, y: 0.5 });
+            const [isEditingCrop, setIsEditingCrop] = useState(false);
+
+            useEffect(() => { generateSample(); }, []);
+
+            // Main Effect: Trigger processing when critical dependencies change
+            // Note: We do NOT include isEditingCrop here, so canceling doesn't re-process
+            useEffect(() => {
+                if(originalSrc && !isEditingCrop) processImage();
+            }, [originalSrc, mode, fitColor, fitExtend, cropPos, isEditingCrop]);
+
+            const generateSample = () => {
+                const cvs = document.createElement('canvas');
+                cvs.width = 1200; cvs.height = 1200;
+                const ctx = cvs.getContext('2d');
+                // Pattern
+                const g = ctx.createLinearGradient(0,0,1200,1200);
+                g.addColorStop(0,"#1e3a8a"); g.addColorStop(0.5,"#ffffff"); g.addColorStop(1,"#b91c1c");
+                ctx.fillStyle = g; ctx.fillRect(0,0,1200,1200);
+                // Text
+                ctx.fillStyle = "black"; ctx.font="bold 80px sans-serif"; ctx.textAlign="center";
+                ctx.fillText("Spectra 6", 600, 600);
+                // Color Bars
+                PALETTE.forEach((c,i) => {
+                    ctx.fillStyle = `rgb(${c[0]},${c[1]},${c[2]})`;
+                    ctx.fillRect(i*170, 1000, 170, 200);
+                });
+                setOriginalSrc(cvs.toDataURL());
+            };
+
+            const processImage = () => {
+                if (!originalSrc) return;
+                setIsProcessing(true);
+                if (downloadUrl) URL.revokeObjectURL(downloadUrl);
+
+                setTimeout(() => {
+                    const img = new Image();
+                    img.src = originalSrc;
+                    img.onload = () => {
+                        const cvs = document.createElement('canvas');
+                        cvs.width = TARGET_W; cvs.height = TARGET_H;
+                        const ctx = cvs.getContext('2d');
+
+                        // Background
+                        if (mode === 'fit') ctx.fillStyle = fitColor;
+                        else ctx.fillStyle = "#FFFFFF";
+                        ctx.fillRect(0, 0, TARGET_W, TARGET_H);
+
+                        const rImg = img.width / img.height;
+                        let w, h, x, y;
+
+                        if (mode === 'scale') {
+                            x = 0; y = 0; w = TARGET_W; h = TARGET_H;
+                        } 
+                        else if (mode === 'crop') {
+                            if (rImg > TARGET_RATIO) { 
+                                h = TARGET_H; w = h * rImg; y = 0; 
+                                const maxOverflow = TARGET_W - w; 
+                                x = maxOverflow * cropPos.x;
+                            } else {
+                                w = TARGET_W; h = w / rImg; x = 0; 
+                                const maxOverflow = TARGET_H - h;
+                                y = maxOverflow * cropPos.y;
+                            }
+                        } 
+                        else { // fit
+                            if (rImg > TARGET_RATIO) { w = TARGET_W; h = w / rImg; x = 0; y = (TARGET_H - h) / 2; } 
+                            else { h = TARGET_H; w = h * rImg; y = 0; x = (TARGET_W - w) / 2; }
+
+                            if (fitExtend) {
+                                ctx.drawImage(img, 0, 0, img.width, 1, 0, 0, TARGET_W, y); // Top
+                                ctx.drawImage(img, 0, img.height-1, img.width, 1, 0, y+h, TARGET_W, TARGET_H-(y+h)); // Bottom
+                                ctx.drawImage(img, 0, 0, 1, img.height, 0, 0, x, TARGET_H); // Left
+                                ctx.drawImage(img, img.width-1, 0, 1, img.height, x+w, 0, TARGET_W-(x+w), TARGET_H); // Right
+                            }
+                        }
+
+                        ctx.imageSmoothingEnabled = true;
+                        ctx.imageSmoothingQuality = 'high';
+                        ctx.drawImage(img, x, y, w, h);
+
+                        // Dither
+                        const iData = ctx.getImageData(0,0,TARGET_W, TARGET_H);
+                        const dData = ditherImageData(iData);
+                        ctx.putImageData(dData, 0, 0);
+
+                        setProcessedSrc(cvs.toDataURL('image/png'));
+                        cvs.toBlob(blob => {
+                            setDownloadUrl(URL.createObjectURL(blob));
+                            setIsProcessing(false);
+                        }, 'image/png');
+                    };
+                }, 10);
+            };
+
+            const handleFile = (e) => {
+                const f = e.target.files[0];
+                if(f) {
+                    const r = new FileReader();
+                    r.onload = (ev) => { 
+                        setOriginalSrc(ev.target.result); 
+                        setCropPos({x: 0.5, y: 0.5}); // Reset crop on new file
+                    };
+                    r.readAsDataURL(f);
+                }
+            };
+
+            const triggerDownload = () => {
+                if(!downloadUrl) return;
+                const a = document.createElement('a');
+                a.href = downloadUrl;
+                a.download = `spectra6_output.png`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+            };
+
+            return (
+                <div className="flex flex-col items-center min-h-screen py-10 px-4 pb-24">
+                    <h1 className="text-3xl font-bold text-white mb-2">Spectra 6 Converter</h1>
+                    
+                    <div className="bg-slate-800 p-4 md:p-6 rounded-xl border border-slate-700 shadow-2xl w-full max-w-6xl relative overflow-hidden">
+                        
+                        {/* CROP EDITOR OVERLAY */}
+                        {isEditingCrop && originalSrc && (
+                            <CropEditor 
+                                src={originalSrc} 
+                                initialPos={cropPos}
+                                onApply={(newPos) => { setCropPos(newPos); setIsEditingCrop(false); }}
+                                onCancel={() => setIsEditingCrop(false)}
+                            />
+                        )}
+
+                        {/* CONTROLS */}
+                        <div className="flex flex-col xl:flex-row justify-between items-start xl:items-center mb-6 gap-4 bg-slate-900/50 p-4 rounded-lg">
+                            <label className="bg-blue-600 hover:bg-blue-500 text-white px-5 py-2.5 rounded-lg cursor-pointer font-bold flex items-center gap-2 shadow-lg active:scale-95 transition w-full xl:w-auto justify-center">
+                                <Icons.Upload /> <span>Upload Image</span>
+                                <input type="file" className="hidden" accept="image/*" onChange={handleFile} />
+                            </label>
+
+                            <div className="flex flex-col sm:flex-row gap-4 w-full xl:w-auto">
+                                <div className="flex bg-slate-800 p-1 rounded-lg border border-slate-700 w-full sm:w-auto">
+                                    {['crop', 'fit', 'scale'].map(m => (
+                                        <button key={m} onClick={() => setMode(m)}
+                                            className={`flex-1 sm:flex-none px-4 py-2 rounded text-sm font-medium capitalize transition-all ${mode === m ? 'bg-slate-600 text-white shadow' : 'text-slate-400 hover:text-white'}`}>
+                                            {m}
+                                        </button>
+                                    ))}
+                                </div>
+
+                                {mode === 'fit' && (
+                                    <div className="flex items-center gap-3 bg-slate-800 px-3 py-1 rounded-lg border border-slate-700 animate-in fade-in">
+                                        <div className="flex items-center gap-2" title="Background Color">
+                                            <span className="text-xs text-slate-400">BG:</span>
+                                            <input type="color" value={fitColor} onChange={e => setFitColor(e.target.value)} 
+                                                className="w-8 h-8 rounded cursor-pointer border-none bg-transparent" />
+                                        </div>
+                                        <div className="h-4 w-px bg-slate-600"></div>
+                                        <label className="flex items-center gap-2 cursor-pointer text-sm text-slate-300">
+                                            <input type="checkbox" checked={fitExtend} onChange={e => setFitExtend(e.target.checked)} className="rounded bg-slate-700" />
+                                            <span>Extend Edges</span>
+                                        </label>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+
+                        {/* PREVIEWS */}
+                        <div className="grid lg:grid-cols-2 gap-8">
+                            {/* Input */}
+                            <div className="flex flex-col gap-2">
+                                <h3 className="text-xs font-bold text-slate-500 uppercase">Input</h3>
+                                <div className="aspect-[5/3] bg-slate-900 border border-slate-700 rounded-lg overflow-hidden relative group">
+                                    {originalSrc && <img src={originalSrc} className="w-full h-full object-contain" />}
+                                    
+                                    {/* Adjust Crop Button */}
+                                    {mode === 'crop' && originalSrc && (
+                                        <div className="absolute inset-0 bg-black/40 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+                                            <button onClick={() => setIsEditingCrop(true)} className="bg-white text-slate-900 px-5 py-2 rounded-full font-bold shadow-xl flex items-center gap-2 transform hover:scale-105 transition">
+                                                <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" /></svg>
+                                                Adjust Crop
+                                            </button>
+                                        </div>
+                                    )}
+                                    {mode === 'crop' && originalSrc && !isEditingCrop && (
+                                        <div className="absolute bottom-2 right-2 bg-black/60 text-white text-xs px-2 py-1 rounded pointer-events-none lg:hidden">Tap to Adjust</div>
+                                    )}
+                                </div>
+                            </div>
+
+                            {/* Output */}
+                            <div className="flex flex-col gap-2">
+                                <div className="flex justify-between items-end">
+                                    <h3 className="text-xs font-bold text-blue-500 uppercase">Output (Spectra 6)</h3>
+                                    {isProcessing && <div className="flex items-center gap-2 text-xs text-yellow-500 font-mono"><div className="spinner w-3 h-3 border-2"></div> PROCESSING</div>}
+                                </div>
+                                <div className="aspect-[5/3] bg-white border border-slate-500 rounded-lg overflow-hidden flex items-center justify-center relative shadow-inner">
+                                    {processedSrc ? (
+                                        <img src={processedSrc} className="w-full h-full object-contain pixelated" />
+                                    ) : <div className="text-slate-400">No Signal</div>}
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Download */}
+                        {downloadUrl && (
+                            <div className="mt-8 flex flex-col sm:flex-row justify-center gap-4">
+                                <button onClick={triggerDownload} 
+                                    className="bg-green-600 hover:bg-green-500 text-white font-bold py-3 px-8 rounded-lg shadow-lg flex items-center justify-center gap-2 transition-all active:scale-95">
+                                    <Icons.Download /> Download PNG
+                                </button>
+                                <a href={downloadUrl} target="_blank"
+                                    className="bg-slate-700 hover:bg-slate-600 text-white font-bold py-3 px-8 rounded-lg shadow-lg flex items-center justify-center gap-2 transition-all">
+                                    Open in New Tab
+                                </a>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
+
