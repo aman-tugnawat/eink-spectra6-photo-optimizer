@@ -7,11 +7,13 @@ This project contains two parts:
 
 ## 1\. Using the Web App
 
-Simply open `index.html` in any modern web browser. No installation required.
+Live at https://aman-tugnawat.github.io/eink-spectra6-photo-optimizer/ . Fully self-contained: React, Babel and a precompiled Tailwind stylesheet live in `vendor/`, so it needs no CDN. Serve the folder (e.g. `python3 -m http.server`) or open `index.html`.
+
+If you change Tailwind classes in `index.html`, rebuild the CSS with `npm run build:css`.
 
   - **Upload:** Supports PNG, JPG, HEIC.
   - **Resize:** Automatically covers 800x480.
-  - **Dither:** Uses `epdoptimize` with Floyd-Steinberg dithering for the Spectra 6 palette.
+  - **Dither:** Built-in Floyd-Steinberg dithering in the browser.
 
 ## 2\. Using the API
 
@@ -20,7 +22,8 @@ If you want to run the automated API server:
 ### Prerequisites
 
   - Node.js installed.
-  - System dependencies for `node-canvas` (e.g., `libcairo2-dev` on Ubuntu/Debian, or automagically handled on macOS/Windows usually).
+  - Node.js 18+. `canvas` v3 ships prebuilt binaries for common platforms.
+  - The API uses `epdoptimize` 1.x (`spectra6Palette`, Floyd-Steinberg, then `replaceColors` to device colors).
 
 ### Installation
 

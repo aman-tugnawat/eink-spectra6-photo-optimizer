@@ -4,21 +4,9 @@ const { createCanvas, loadImage } = require('canvas');
 const fs = require('fs');
 const path = require('path');
 
-// Dynamic import for epdoptimize (it's an ESM module)
-// We also need JSDOM because epdoptimize expects a browser environment
-const jsdom = require('jsdom');
-const { JSDOM } = jsdom;
-
+// epdoptimize is ESM; load it with dynamic import. It works directly on node-canvas, no DOM needed.
 const app = express();
 const upload = multer({ dest: 'uploads/' });
-
-// -- MOCK BROWSER ENV FOR LIBRARY --
-// epdoptimize relies on 'document' and 'HTMLCanvasElement'
-const dom = new JSDOM(`<!DOCTYPE html><body></body>`);
-global.window = dom.window;
-global.document = dom.window.document;
-global.HTMLCanvasElement = dom.window.HTMLCanvasElement; // May need canvas implementation
-// ----------------------------------
 
 let epdoptimize;
 
@@ -69,34 +57,21 @@ app.post('/convert', upload.single('image'), async (req, res) => {
         
         ctx.drawImage(image, offsetX, offsetY, drawWidth, drawHeight);
 
-        // 3. Dither
-        // NOTE: Since we are in Node, we need to pass a context/canvas that the library accepts.
-        // epdoptimize likely uses `getImageData` and `putImageData`.
-        // We might need to convert node-canvas to something compliant if strict checks exist,
-        // but typically node-canvas mimics the browser API well enough.
-        
-        const palette = epdoptimize.getDefaultPalettes('spectra6');
-        const options = {
-            algorithm: 'floydSteinberg',
-            palette: palette
-        };
+        // 3. Dither with calibrated Spectra 6 colors, then map to the colors the panel expects
+        const palette = epdoptimize.spectra6Palette;
+        const dithered = createCanvas(800, 480);
+        await epdoptimize.ditherImage(canvas, dithered, {
+            palette,
+            ditheringType: 'errorDiffusion',
+            errorDiffusionMatrix: 'floydSteinberg',
+            serpentine: true,
+        });
+        const device = createCanvas(800, 480);
+        epdoptimize.replaceColors(dithered, device, palette);
 
-        // We pass the canvas we created. 
-        // Note: The library creates its own return canvas using document.createElement.
-        // Since we mocked global.document with JSDOM, it should work, creating a JSDOM canvas.
-        const outputCanvas = epdoptimize.ditherImage(canvas, options);
-        
         // 4. Send response
-        // outputCanvas is likely a DOM canvas from JSDOM. We need to get the buffer.
-        // JSDOM canvas might not support toBuffer() directly if it's not backed by node-canvas properly in the mock.
-        // Safer way: Get image data and put it on a fresh node-canvas.
-        
-        // However, if JSDOM is set up with node-canvas support, toDataURL works.
-        const dataUrl = outputCanvas.toDataURL('image/png');
-        const base64Data = dataUrl.replace(/^data:image\/png;base64,/, "");
-        
-        const outputBuffer = Buffer.from(base64Data, 'base64');
-        
+        const outputBuffer = device.toBuffer('image/png');
+
         res.set('Content-Type', 'image/png');
         res.send(outputBuffer);
 

@@ -4,13 +4,13 @@
   "description": "API for converting images to Spectra 6 format",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "build:css": "npx -y tailwindcss@3.4.17 -i tailwind.input.css --content index.html -o vendor/tailwind.css --minify"
   },
   "dependencies": {
+    "canvas": "^3.2.0",
+    "epdoptimize": "^1.3.0",
     "express": "^4.18.2",
-    "multer": "^1.4.5-lts.1",
-    "canvas": "^2.11.2",
-    "jsdom": "^22.1.0",
-    "epdoptimize": "^0.5.0"
+    "multer": "^1.4.5-lts.1"
   }
 }
